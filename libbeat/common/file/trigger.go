@@ -115,6 +115,7 @@ func (realClock) Now() time.Time {
 
 func newIntervalTrigger(interval time.Duration) trigger {
 	t := intervalTrigger{interval: interval, clock: realClock{}}
+	t.TriggerRotation(0)
 
 	switch interval {
 	case time.Second:
@@ -143,7 +144,7 @@ func newIntervalTrigger(interval time.Duration) trigger {
 
 func (t *intervalTrigger) TriggerRotation(_ uint) rotateReason {
 	now := t.clock.Now()
-	if t.newInterval(t.lastRotate, now) {
+	if nil == t.newInterval || t.newInterval(t.lastRotate, now) {
 		t.lastRotate = now
 		return rotateReasonTimeInterval
 	}

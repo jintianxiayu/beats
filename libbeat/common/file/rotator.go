@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,18 @@ const (
 var suffixes = map[string]SuffixType{
 	"count": SuffixCount,
 	"date":  SuffixDate,
+}
+
+const (
+	Day = 24 * time.Hour
+)
+
+// 不同时间粒度的格式
+var timePattern = map[time.Duration]string{
+	time.Second: "2006-01-02_15:04:05",
+	time.Minute: "2006-01-02_15:04",
+	time.Hour:   "2006-01-02_15",
+	Day:         "2006-01-02",
 }
 
 // rotater is the interface responsible for rotating and finding files.
@@ -207,7 +220,6 @@ func NewFileRotator(filename string, options ...RotatorOption) (*Rotator, error)
 func (r *Rotator) Write(data []byte) (int, error) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-
 	dataLen := uint(len(data))
 	if dataLen > r.maxSizeBytes {
 		return 0, errors.Errorf("data size (%d bytes) is greater than "+
@@ -220,6 +232,7 @@ func (r *Rotator) Write(data []byte) (int, error) {
 		}
 	} else {
 		if reason, t := r.isRotationTriggered(dataLen); reason != rotateReasonNoRotate {
+
 			if err := r.rotateWithTime(reason, t); err != nil {
 				return 0, errors.Wrapf(err, "error file rotating files reason: %s", reason)
 			}
@@ -422,7 +435,7 @@ func newRotater(log Logger, s SuffixType, filename string, maxBackups uint, inte
 			maxBackups: maxBackups,
 		}
 	case SuffixDate:
-		return newDateRotater(log, filename)
+		return newDateRotater(log, filename, interval)
 	default:
 		return &countRotator{
 			log:        log,
@@ -432,14 +445,26 @@ func newRotater(log Logger, s SuffixType, filename string, maxBackups uint, inte
 	}
 }
 
-func newDateRotater(log Logger, filename string) rotater {
+func setCurrentFilename(d *dateRotator) {
+	dotIndex := strings.LastIndex(d.filenamePrefix, ".")
+	if dotIndex == -1 {
+		d.currentFilename = d.filenamePrefix + "-" + time.Now().Format(d.format)
+	} else {
+		d.currentFilename = d.filenamePrefix[0:dotIndex] + "-" + time.Now().Format(d.format) + d.filenamePrefix[dotIndex:]
+	}
+}
+
+func newDateRotater(log Logger, filename string, interval time.Duration) rotater {
+	tp := timePattern[interval]
+	if tp == "" {
+		tp = timePattern[Day]
+	}
 	d := &dateRotator{
 		log:            log,
 		filenamePrefix: filename,
-		format:         "20060102150405",
+		format:         tp,
 	}
-
-	d.currentFilename = d.filenamePrefix + "-" + time.Now().Format(d.format)
+	setCurrentFilename(d)
 	files, err := filepath.Glob(d.filenamePrefix + "*")
 	if err != nil {
 		return d
@@ -466,8 +491,7 @@ func (d *dateRotator) Rotate(reason rotateReason, rotateTime time.Time) error {
 	if d.log != nil {
 		d.log.Debugw("Rotating file", "filename", d.currentFilename, "reason", reason)
 	}
-
-	d.currentFilename = d.filenamePrefix + "-" + rotateTime.Format(d.format)
+	setCurrentFilename(d)
 	return nil
 }
 

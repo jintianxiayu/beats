@@ -15,20 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package includes
+// +build !integration
 
-import (
-	// import queue types
-	_ "github.com/elastic/beats/v7/libbeat/outputs/codec/format"
-	_ "github.com/elastic/beats/v7/libbeat/outputs/codec/json"
-	_ "github.com/elastic/beats/v7/libbeat/outputs/console"
-	_ "github.com/elastic/beats/v7/libbeat/outputs/elasticsearch"
-	_ "github.com/elastic/beats/v7/libbeat/outputs/fileout"
-	_ "github.com/elastic/beats/v7/libbeat/outputs/fileout2"
-	_ "github.com/elastic/beats/v7/libbeat/outputs/kafka"
-	_ "github.com/elastic/beats/v7/libbeat/outputs/logstash"
-	_ "github.com/elastic/beats/v7/libbeat/outputs/redis"
-	_ "github.com/elastic/beats/v7/libbeat/publisher/queue/diskqueue"
-	_ "github.com/elastic/beats/v7/libbeat/publisher/queue/memqueue"
-	_ "github.com/elastic/beats/v7/libbeat/publisher/queue/spool"
-)
+package fileout2
