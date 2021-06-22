@@ -21,6 +21,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/elastic/beats/v7/libbeat/beat"
 	"github.com/elastic/beats/v7/libbeat/common"
@@ -36,13 +37,12 @@ func init() {
 }
 
 type fileOutput struct {
-	log       *logp.Logger
-	filePath  string
-	beat      beat.Info
-	observer  outputs.Observer
-	rotator   *file.Rotator
-	codec     codec.Codec
-	batchSize int
+	log               *logp.Logger
+	beat              beat.Info
+	observer          outputs.Observer
+	codec             codec.Codec
+	batchSize         int
+	containerRotators map[string]*file.Rotator
 }
 
 // makeFileout instantiates a new file output instance.
@@ -60,40 +60,50 @@ func makeFileout(
 	// disable bulk support in publisher pipeline
 	cfg.SetInt("bulk_max_size", -1, -1)
 	fo := &fileOutput{
-		log:       logp.NewLogger("file2"),
-		beat:      beat,
-		observer:  observer,
-		batchSize: config.BatchSize,
+		log:               logp.NewLogger("file2"),
+		beat:              beat,
+		observer:          observer,
+		batchSize:         config.BatchSize,
+		containerRotators: make(map[string]*file.Rotator),
 	}
 	if err := fo.init(beat, config); err != nil {
 		return outputs.Fail(err)
 	}
 
+	// fo 是 Client接口的实现
 	return outputs.Success(config.BatchSize, 0, fo)
 }
 
 func (out *fileOutput) init(beat beat.Info, c config) error {
-	var path string
-	if c.Filename != "" {
-		path = filepath.Join(c.Path, c.Filename)
-	} else {
-		path = filepath.Join(c.Path, out.beat.Beat)
-	}
-
-	out.filePath = path
-
 	var err error
 	rg := RotateGrade[c.RotateGrade]
-	out.rotator, err = file.NewFileRotator(
-		path,
-		file.Suffix(c.Suffix),
-		file.MaxSizeBytes(c.RotateEveryKb*1024),
-		file.MaxBackups(c.NumberOfFiles),
-		file.Permissions(os.FileMode(c.Permissions)),
-		file.WithLogger(logp.NewLogger("rotator").With(logp.Namespace("rotator"))),
-		file.RotateOnStartup(c.RotateOnStartup),
-		file.Interval(rg),
-	)
+
+	// 一个container对应一个rotator
+	// publish的时候根据container查找rotator，然后write
+	for i := range c.Containers {
+		cName := c.Containers[i]
+		filename := strings.Replace(c.Filename, "$CONTAINER$", cName, 1)
+		path := filepath.Join(c.Path, filename)
+		out.containerRotators[cName], err = file.NewFileRotator(
+			path,
+			file.Suffix(c.Suffix),
+			file.MaxSizeBytes(c.RotateEveryKb*1024),
+			file.MaxBackups(c.NumberOfFiles),
+			file.Permissions(os.FileMode(c.Permissions)),
+			file.WithLogger(logp.NewLogger("rotator").With(logp.Namespace("rotator"))),
+			file.RotateOnStartup(c.RotateOnStartup),
+			file.Interval(rg),
+		)
+
+		if err != nil {
+			return err
+		}
+
+		out.log.Infof("Initialized file2 output. "+
+			"path=%v max_size_bytes=%v max_backups=%v permissions=%v rotate_on_startup=%v",
+			path, c.RotateEveryKb*1024, c.NumberOfFiles, os.FileMode(c.Permissions), c.RotateOnStartup)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -103,15 +113,39 @@ func (out *fileOutput) init(beat beat.Info, c config) error {
 		return err
 	}
 
-	out.log.Infof("Initialized file2 output. "+
-		"path=%v max_size_bytes=%v max_backups=%v permissions=%v rotate_on_startup=%v",
-		path, c.RotateEveryKb*1024, c.NumberOfFiles, os.FileMode(c.Permissions), c.RotateOnStartup)
 	return nil
 }
 
 // Implement Outputer
 func (out *fileOutput) Close() error {
-	return out.rotator.Close()
+	var err error
+	for _, v := range out.containerRotators {
+		err = v.Close()
+		if err != nil {
+			break
+		}
+	}
+	return err
+}
+
+func getContainerName(event *publisher.Event, out *fileOutput) string {
+	var cName string
+	cVal, _ := event.Content.Fields.GetValue("container")
+	if cVal != nil {
+		if cMap, ok := cVal.(common.MapStr); ok {
+			labelVal, _ := cMap.GetValue("labels")
+			if labelVal != nil {
+				if labelMap, ok := labelVal.(common.MapStr); ok {
+					cNameVal := labelMap["io_kubernetes_container_name"]
+					if cNameVal != nil {
+						cName, _ = cNameVal.(string)
+					}
+				}
+			}
+		}
+	}
+	return cName
+
 }
 
 func (out *fileOutput) Publish(_ context.Context, batch publisher.Batch) error {
@@ -121,13 +155,17 @@ func (out *fileOutput) Publish(_ context.Context, batch publisher.Batch) error {
 	events := batch.Events()
 	st.NewBatch(len(events))
 
+	containerBufferData := make(map[string][]byte) // 每个容器缓存的event byte
+	containerBufferCount := make(map[string]int)   // 每个容器缓存的event数量
+	for k, _ := range out.containerRotators {
+		containerBufferData[k] = make([]byte, 0)
+		containerBufferCount[k] = 0
+	}
+
 	dropped := 0
-
-	bufferedEvents := make([]byte, 0)
-	bufferCount := 0
-
 	for i := range events {
 		event := &events[i]
+
 		serializedEvent, err := out.codec.Encode(out.beat.Beat, &event.Content)
 		if err != nil {
 			if event.Guaranteed() {
@@ -140,35 +178,50 @@ func (out *fileOutput) Publish(_ context.Context, batch publisher.Batch) error {
 			dropped++
 			continue
 		}
-		bufferedEvents = append(append(bufferedEvents, serializedEvent...), '\n')
-		bufferCount++
 
+		cName := getContainerName(event, out)
+		rotator := out.containerRotators[cName]
+		if rotator == nil {
+			dropped++
+			continue
+		}
+
+		containerBufferCount[cName]++
+		containerBufferData[cName] = append(append(containerBufferData[cName], serializedEvent...), '\n')
+		bufferCount := containerBufferCount[cName]
 		if bufferCount >= out.batchSize {
-			if _, err = out.rotator.Write(bufferedEvents); err != nil {
+			if _, err = rotator.Write(containerBufferData[cName]); err != nil {
 				st.WriteError(err)
 
 				if event.Guaranteed() {
-					out.log.Errorf("Writing event to file2 failed with: %+v", err)
+					out.log.Errorf("Writing event to file failed with: %+v", err)
 				} else {
-					out.log.Warnf("Writing event to file2 failed with: %+v", err)
+					out.log.Warnf("Writing event to file failed with: %+v", err)
 				}
+
 				dropped += bufferCount
-				bufferCount = 0
-				bufferedEvents = make([]byte, 0)
+				containerBufferData[cName] = make([]byte, 0)
 				continue
 			}
-
-			st.WriteBytes(len(bufferedEvents) + bufferCount)
-			bufferCount = 0
-			bufferedEvents = make([]byte, 0)
+			st.WriteBytes(len(containerBufferData[cName]) + bufferCount)
+			containerBufferData[cName] = make([]byte, 0)
+			containerBufferCount[cName] = 0
 		}
 	}
-	if bufferCount > 0 {
-		if _, err := out.rotator.Write(bufferedEvents); err != nil {
-			st.WriteError(err)
-			dropped += bufferCount
-		} else {
-			st.WriteBytes(len(bufferedEvents) + bufferCount)
+
+	// 写出剩余的event
+	for cName, remainCount := range containerBufferCount {
+		remainEvents := containerBufferData[cName]
+		rotator := out.containerRotators[cName]
+		if remainCount > 0 {
+			if _, err := rotator.Write(remainEvents); err != nil {
+				st.WriteError(err)
+
+				dropped += remainCount
+				containerBufferData[cName] = make([]byte, 0)
+				continue
+			}
+			st.WriteBytes(len(remainEvents) + remainCount)
 		}
 	}
 
@@ -179,5 +232,5 @@ func (out *fileOutput) Publish(_ context.Context, batch publisher.Batch) error {
 }
 
 func (out *fileOutput) String() string {
-	return "file2(" + out.filePath + ")"
+	return "file2()"
 }

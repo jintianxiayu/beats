@@ -36,6 +36,7 @@ type config struct {
 	RotateOnStartup bool            `config:"rotate_on_startup"`
 	RotateGrade     string          `config:"rotate_grade"` // 滚动等级，day,hour,minute,second
 	BatchSize       int             `config:"write_batch_size" validate:"min=1,max=2048"`
+	Containers      []string        `config:"container_names"` // 容器名称列表
 }
 
 var RotateGrade = map[string]time.Duration{
