@@ -250,13 +250,17 @@ func (r *Rotator) Write(data []byte) (int, error) {
 // openNew opens r's log file for the first time, creating it if it doesn't
 // exist.
 func (r *Rotator) openNew() error {
-	err := os.MkdirAll(r.dir(), r.dirMode())
+	dir := r.dir()
+	mode := r.dirMode()
+	fmt.Printf("in openNew ================>>>>>>>>>>> dir=%s  mode=%o \n", dir, mode)
+	err := os.MkdirAll(dir, mode)
 	if err != nil {
 		return errors.Wrap(err, "failed to make directories for new file")
 	}
 
-	_, err = os.Stat(r.rot.ActiveFile())
+	fileinfo, err := os.Stat(r.rot.ActiveFile())
 	if err == nil {
+		fmt.Printf("in openNew ================>>>>>>>>>>> specific permissions=%o , file=%s  mode=%o \n", r.permissions, r.rot.ActiveFile(), fileinfo.Mode())
 		// check if the file has to be rotated before writing to it
 		reason, t := r.isRotationTriggered(0)
 		if reason == rotateReasonNoRotate {
@@ -289,12 +293,17 @@ func (r *Rotator) appendToFile() error {
 }
 
 func (r *Rotator) openFile() error {
-	err := os.MkdirAll(r.dir(), r.dirMode())
+	dir := r.dir()
+	mode := r.dirMode()
+	fmt.Printf("in openFile ================>>>>>>>>>>> dir=%s  mode=%o \n", dir, mode)
+	err := os.MkdirAll(dir, mode)
 	if err != nil {
 		return errors.Wrap(err, "failed to make directories for new file")
 	}
 
 	r.file, err = os.OpenFile(r.rot.ActiveFile(), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, r.permissions)
+	fileinfo, _ := r.file.Stat()
+	fmt.Printf("in openFile ================>>>>>>>>>>> specific permissions=%o , file=%s  mode=%o \n", r.permissions, fileinfo.Name(), fileinfo.Mode())
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("failed to open new file '%s'", r.rot.ActiveFile()))
 	}
