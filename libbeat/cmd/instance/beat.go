@@ -1146,5 +1146,5 @@ func setUmaskWithSettings(settings Settings) error {
 	if settings.Umask != nil {
 		return setUmask(*settings.Umask)
 	}
-	return setUmask(0027) // 0640 for files | 0750 for dirs
+	return setUmask(0022) // 0640 for files | 0750 for dirs
 }
